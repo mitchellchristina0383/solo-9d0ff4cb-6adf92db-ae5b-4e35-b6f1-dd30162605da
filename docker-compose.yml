@@ -1,0 +1,20 @@
+services:
+  latency-review:
+    build: .
+    image: latency-review:latest
+    container_name: latency-review
+    ports:
+      - "8000:8000"
+    volumes:
+      - latency-data:/data
+    environment:
+      LATENCY_DB: /data/latency.db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/snapshot', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  latency-data:

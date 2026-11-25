@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>滚动发布延迟达标复盘</title>
+  <style>
+    :root {
+      --bg: #f5f7fa; --card: #fff; --line: #d9dee5; --text: #1f2933;
+      --muted: #697586; --blue: #2563eb; --red: #dc2626; --green: #15803d;
+      --amber: #b45309; --chip: #eef2ff;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+           background: var(--bg); color: var(--text); line-height: 1.55; }
+    header { background: #0f172a; color: #fff; padding: 18px 28px; }
+    header h1 { margin: 0; font-size: 20px; }
+    header p { margin: 4px 0 0; color: #94a3b8; font-size: 13px; }
+    main { max-width: 1080px; margin: 24px auto; padding: 0 20px; display: grid;
+           grid-template-columns: 380px 1fr; gap: 20px; }
+    @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+            padding: 18px 20px; margin-bottom: 20px; }
+    .card h2 { margin: 0 0 12px; font-size: 16px; }
+    label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+    input, textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--line);
+                      border-radius: 6px; font-size: 14px; font-family: inherit; }
+    textarea { min-height: 110px; resize: vertical; font-family: ui-monospace, monospace; }
+    button { margin-top: 14px; background: var(--blue); color: #fff; border: 0;
+             border-radius: 6px; padding: 9px 18px; font-size: 14px; cursor: pointer; }
+    button:hover { filter: brightness(1.08); }
+    button.ghost { background: #fff; color: var(--red); border: 1px solid var(--line); }
+    .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+    .msg { margin-top: 10px; padding: 8px 10px; border-radius: 6px; font-size: 13px;
+           white-space: pre-wrap; display: none; }
+    .msg.err { display: block; background: #fef2f2; color: var(--red); border: 1px solid #fecaca; }
+    .msg.ok { display: block; background: #f0fdf4; color: var(--green); border: 1px solid #bbf7d0; }
+    .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+    .kpi { background: #f8fafc; border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+    .kpi .v { font-size: 20px; font-weight: 700; }
+    .kpi .k { font-size: 12px; color: var(--muted); }
+    .decision { margin-top: 14px; padding: 14px; border-radius: 8px; font-weight: 600; }
+    .decision.pass { background: #f0fdf4; color: var(--green); border: 1px solid #bbf7d0; }
+    .decision.fail { background: #fef2f2; color: var(--red); border: 1px solid #fecaca; }
+    .decision.inconclusive, .decision.no_data {
+      background: #fffbeb; color: var(--amber); border: 1px solid #fde68a; }
+    .decision small { display: block; font-weight: 400; margin-top: 4px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border-bottom: 1px solid var(--line); padding: 8px 6px; text-align: left;
+             vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; }
+    .tag { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; }
+    .tag.good { background: #dcfce7; color: var(--green); }
+    .tag.bad { background: #fee2e2; color: var(--red); }
+    .tag.crossing, .tag.unknown { background: #fef3c7; color: var(--amber); }
+    .tag.invalid { background: #f1f5f9; color: var(--muted); }
+    .muted { color: var(--muted); font-size: 12px; }
+    details { margin-top: 6px; }
+    summary { cursor: pointer; font-size: 12px; color: var(--blue); }
+    code { background: var(--chip); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>滚动发布延迟达标复盘</h1>
+  <p>逐实例补录窗口首尾累计直方图；跨延迟上限的桶与观测缺口按未知处理，按达标率上下界给出结论。</p>
+</header>
+<main>
+  <section>
+    <div class="card">
+      <h2>1. 窗口参数</h2>
+      <label>网关完结请求总数 N（必须大于 0）</label>
+      <input id="gateway_total" type="number" min="1" step="1" placeholder="例如 10000">
+      <label>延迟上限 L（毫秒，&le; L 视为达标）</label>
+      <input id="latency_limit" type="number" min="0" step="any" placeholder="例如 200">
+      <label>目标达标率（%，例如 99.9 表示 99.9%）</label>
+      <input id="target_ratio" type="number" min="0.0001" max="100" step="any" placeholder="例如 99.9">
+      <button onclick="saveConfig()">保存参数</button>
+      <div id="config-msg" class="msg"></div>
+    </div>
+
+    <div class="card">
+      <h2>2. 实例样本补录 / 更正</h2>
+      <label>实例 ID（重复提交即替换该实例旧样本）</label>
+      <input id="instance_id" placeholder="例如 gateway-i-07">
+      <label>窗口首启动标识</label>
+      <input id="start_marker" placeholder="例如 boot-abc-123">
+      <label>窗口尾启动标识（与首标识不同则该样本对不计覆盖）</label>
+      <input id="end_marker" placeholder="例如 boot-abc-123">
+      <label>窗口首累计直方图（每行：桶界, 累计计数）</label>
+      <textarea id="start_hist" placeholder="50, 120&#10;100, 340&#10;200, 800&#10;500, 1500"></textarea>
+      <label>窗口尾累计直方图（每行：桶界, 累计计数；各实例桶界可不同）</label>
+      <textarea id="end_hist" placeholder="50, 400&#10;100, 900&#10;200, 1700&#10;500, 2600"></textarea>
+      <p class="hint">桶界必须严格递增、非负；累计计数必须是非负整数且首尾差值保持累计单调。</p>
+      <button onclick="submitInstance()">提交样本</button>
+      <div id="inst-msg" class="msg"></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="card">
+      <h2>汇总结论（与覆盖数来自同一已提交状态）</h2>
+      <div id="config-view" class="muted">尚未配置窗口参数。</div>
+      <div class="kpis" style="margin-top:12px">
+        <div class="kpi"><div class="v" id="kpi-coverage">-</div><div class="k">覆盖请求数 C</div></div>
+        <div class="kpi"><div class="v" id="kpi-goodlo">-</div><div class="k">可确认达标（下界）</div></div>
+        <div class="kpi"><div class="v" id="kpi-goodhi">-</div><div class="k">达标上界（含未知）</div></div>
+        <div class="kpi"><div class="v" id="kpi-unknown">-</div><div class="k">未知请求 U</div></div>
+      </div>
+      <div id="decision" class="decision no_data">等待数据<small></small></div>
+    </div>
+
+    <div class="card">
+      <h2>实例明细（<span id="inst-count">0</span>）</h2>
+      <table>
+        <thead><tr>
+          <th>实例</th><th>状态</th><th>覆盖</th><th>达标/超限/未知</th><th>桶差值</th><th></th>
+        </tr></thead>
+        <tbody id="inst-rows"><tr><td colspan="6" class="muted">暂无样本。</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script>
+function showMsg(id, text, ok) {
+  const el = document.getElementById(id);
+  el.textContent = text;
+  el.className = "msg " + (ok ? "ok" : "err");
+}
+function clearMsg(id) { document.getElementById(id).className = "msg"; }
+
+function parseHistText(text) {
+  const bounds = [], counts = [];
+  for (const line of text.split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t) continue;
+    const parts = t.split(/[,，\s]+/).filter(Boolean);
+    if (parts.length !== 2) throw new Error("无法解析行：" + t + "（应为“桶界, 计数”）");
+    const bound = Number(parts[0]);
+    const count = Number(parts[1]);
+    if (!Number.isFinite(bound) || bound < 0) throw new Error("桶界必须是非负有限数：" + t);
+    if (!Number.isInteger(count) || count < 0) throw new Error("累计计数必须是非负整数：" + t);
+    bounds.push(bound); counts.push(count);
+  }
+  if (!bounds.length) throw new Error("直方图至少需要一个桶");
+  return { bounds, counts };
+}
+
+async function api(method, url, body) {
+  const resp = await fetch(url, {
+    method,
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw Object.assign(new Error(data.error || ("HTTP " + resp.status)),
+                                    { status: resp.status, data });
+  return data;
+}
+
+async function saveConfig() {
+  clearMsg("config-msg");
+  try {
+    const ratio = Number(document.getElementById("target_ratio").value) / 100;
+    const snap = await api("POST", "/api/config", {
+      gateway_total: Number(document.getElementById("gateway_total").value),
+      latency_limit: Number(document.getElementById("latency_limit").value),
+      target_ratio: ratio,
+    });
+    showMsg("config-msg", "参数已保存。", true);
+    render(snap);
+  } catch (e) { showMsg("config-msg", e.message, false); }
+}
+
+async function submitInstance() {
+  clearMsg("inst-msg");
+  try {
+    const body = {
+      instance_id: document.getElementById("instance_id").value,
+      start_marker: document.getElementById("start_marker").value,
+      end_marker: document.getElementById("end_marker").value,
+      start_histogram: parseHistText(document.getElementById("start_hist").value),
+      end_histogram: parseHistText(document.getElementById("end_hist").value),
+    };
+    const snap = await api("POST", "/api/instances", body);
+    showMsg("inst-msg", "样本已提交（同 ID 旧样本已被替换）。", true);
+    render(snap);
+  } catch (e) {
+    showMsg("inst-msg", e.status === 409 ? "提交被退回：" + e.message : e.message, false);
+  }
+}
+
+async function removeInstance(id) {
+  if (!confirm("确认删除实例 " + id + " 的样本？")) return;
+  const snap = await api("DELETE", "/api/instances/" + encodeURIComponent(id));
+  render(snap);
+}
+
+const DECISION_TEXT = { pass: "达标", fail: "未达标", inconclusive: "待确认", no_data: "等待数据" };
+
+function render(snap) {
+  const cfg = snap.config;
+  document.getElementById("config-view").innerHTML = cfg
+    ? `N = <b>${cfg.gateway_total}</b> ｜ L = <b>${cfg.latency_limit} ms</b> ｜ 目标达标率 = <b>${(cfg.target_ratio * 100).toFixed(4).replace(/\.?0+$/, "")}%</b>`
+    : "尚未配置窗口参数。";
+  const s = snap.summary;
+  document.getElementById("kpi-coverage").textContent = cfg ? s.coverage + " / " + cfg.gateway_total : "-";
+  document.getElementById("kpi-goodlo").textContent = s.good_lower;
+  document.getElementById("kpi-goodhi").textContent = s.good_upper;
+  document.getElementById("kpi-unknown").textContent = s.unknown;
+  const box = document.getElementById("decision");
+  box.className = "decision " + s.decision;
+  box.innerHTML = DECISION_TEXT[s.decision] + "<small>" + (s.decision_reason || "") + "</small>";
+
+  const rows = document.getElementById("inst-rows");
+  document.getElementById("inst-count").textContent = snap.instances.length;
+  if (!snap.instances.length) {
+    rows.innerHTML = '<tr><td colspan="6" class="muted">暂无样本。</td></tr>';
+    return;
+  }
+  rows.innerHTML = snap.instances.map(it => {
+    const status = it.valid
+      ? '<span class="tag good">有效</span>'
+      : '<span class="tag invalid">不计覆盖</span>';
+    const reason = it.reason ? `<div class="muted">${escapeHtml(it.reason)}</div>` : "";
+    const markers = `<div class="muted">首 ${escapeHtml(it.start_marker)}<br>尾 ${escapeHtml(it.end_marker)}</div>`;
+    const buckets = it.buckets.map(b =>
+      `<details><summary>桶 &le; ${b.upper_bound}：差值 ${b.count} ` +
+      `<span class="tag ${b.classification}">${
+        {good: "达标桶", bad: "超限桶", crossing: "跨 L 桶（未知）"}[b.classification]
+      }</span></summary></details>`).join("");
+    return `<tr>
+      <td><b>${escapeHtml(it.instance_id)}</b>${markers}</td>
+      <td>${status}${reason}</td>
+      <td>${it.valid ? it.total : "—"}</td>
+      <td>${it.valid ? `${it.good_lower} / ${it.bad_lower} / ${it.unknown}` : "—"}</td>
+      <td>${buckets || '<span class="muted">无可用桶</span>'}</td>
+      <td><button class="ghost" style="margin:0" onclick="removeInstance('${
+        escapeHtml(it.instance_id).replace(/'/g, "\\'")}')">删除</button></td>
+    </tr>`;
+  }).join("");
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+api("GET", "/api/snapshot").then(render).catch(e =>
+  document.getElementById("decision").textContent = "加载失败：" + e.message);
+</script>
+</body>
+</html>
